@@ -1,13 +1,12 @@
 import { chromium } from "playwright-core";
 import Browserbase from "@browserbasehq/sdk";
 
-const bb = new Browserbase({
-    apiKey: process.env.BROWSERBASE_API_KEY,
-});
+const getBrowserbase = () => new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY });
 
 export async function scrapeUrl(url) {
     let browser;
     try {
+        const bb = getBrowserbase();
         const session = await bb.sessions.create({ browserSettings: { blockAds: true } });
         browser = await chromium.connectOverCDP(session.connectUrl);
         const defaultContext = browser.contexts()[0];
@@ -102,9 +101,10 @@ export async function scrapeUrl(url) {
         if (browser) {
             try {
                 await browser.close();
-            } catch (error) {
-                console.error("[SCRAPER] Browser close failed:", error.message);
+            } catch (closeError) {
+                console.error("[SCRAPER] Browser close failed:", closeError.message);
             }
         }
+        return { success: false, error: error.message };
     }
 }

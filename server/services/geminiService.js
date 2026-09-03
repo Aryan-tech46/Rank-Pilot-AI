@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const getAI = () => new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const seoAnalysisSchema = {
     type: Type.OBJECT,
@@ -110,8 +110,9 @@ export async function analyzeSeoData(scrapedData) {
         Provide 5-15 issues sorted by severity (critical first). Be specific and actionable with recommendations.
         Extract top 10 keywords by frequency from the page content.`;
 
+        const ai = getAI();
         const response = await ai.models.generateContent({
-            model: "gemma-4-31b-it",
+            model: "gemini-3.6-flash",
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             config: {
                 responseMimeType: "application/json",

@@ -1,87 +1,119 @@
 import { chromium } from "playwright-core";
 import Browserbase from "@browserbasehq/sdk";
 
-const bb = new Browserbase({
-    apiKey: process.env.BROWSERBASE_API_KEY,
-});
+const getBrowserbase = () => new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY });
 
 // Search Google for a keyword and extract ranking results for a target domain.
 export async function rankTracker(keyword, targetDomain) {
     let browser;
     try {
         // 1. Initialize Browserbase Session & Connect Playwright
+        const bb = getBrowserbase();
         const session = await bb.sessions.create({ browserSettings: { blockAds: true } });
         browser = await chromium.connectOverCDP(session.connectUrl);
         const page = browser.contexts()[0].pages()[0];
-        page.setDefaultNavigationTimeout(45000);
-
-        // 2. Initial Google Visit & Consent Handling
-        await page.goto("https://www.google.com", { waitUntil: "networkidle" });
-        try {
-            const btn = await page.$('button[id="L2AGLb"], form[action*="consent"] button');
-            if (btn) {
-                await btn.click();
-                await page.waitForTimeout(1500);
-            }
-        } catch {}
+        page.setDefaultNavigationTimeout(30000);
 
         let found = null,
             allResults = [];
 
-        const cleanTarget = targetDomain.replace("www.", "").toLowerCase();
+        const cleanTarget = targetDomain.replace(/^https?:\/\//, "").replace("www.", "").split("/")[0].toLowerCase();
 
-        // 3. Search Loop: Iterate through up to 5 pages of Google results
+        // 2. Search Loop: Iterate through up to 5 pages of Google results
         for (let gPage = 0; gPage < 5; gPage++) {
-            await page.goto(`https://www.google.com/search?q=${encodeURIComponent(keyword)}&start=${gPage * 10}&num=10&hl=en&gl=us`, { waitUntil: "networkidle" });
+            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(keyword)}&start=${gPage * 10}&num=10&hl=en&gl=us`;
+            try {
+                await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
+            } catch (navError) {
+                console.warn(`[RANK] Navigation error on page ${gPage + 1}:`, navError.message);
+            }
 
-            // 4. Page Extraction: Retry up to 3 times if results are missing
+            // Consent check (if needed)
+            if (gPage === 0) {
+                try {
+                    const btn = await page.$('button[id="L2AGLb"], form[action*="consent"] button');
+                    if (btn) {
+                        await btn.click();
+                        await page.waitForTimeout(1000);
+                    }
+                } catch {}
+            }
+
+            // 3. Page Extraction: Retry if results are missing
             let pageResults = [];
             for (let retry = 0; retry < 3; retry++) {
                 try {
-                    await page.waitForSelector("h3", { timeout: 8000 });
+                    await page.waitForSelector("h3", { timeout: 6000 });
                     await page.waitForTimeout(1500);
-                    pageResults = await page.evaluate(() =>
-                        Array.from(document.querySelectorAll("h3"))
-                            .map((h3) => {
-                                let a = h3.closest("a");
-                                if (!a) {
-                                    let p = h3.parentElement;
-                                    for (let j = 0; j < 5 && p; j++, p = p.parentElement) {
-                                        if (p.tagName === "A") {
-                                            a = p;
-                                            break;
-                                        }
-                                        const sub = p.querySelector("a[href]");
-                                        if (sub && sub.contains(h3)) {
-                                            a = sub;
-                                            break;
-                                        }
-                                    }
+
+                    pageResults = await page.evaluate(() => {
+                        const items = [];
+                        const containers = document.querySelectorAll("div.MjjYud, div.g");
+
+                        containers.forEach((c) => {
+                            const h3 = c.querySelector("h3");
+                            if (!h3) return;
+
+                            const a = h3.closest("a") || c.querySelector("a[href]");
+                            const cite = c.querySelector("cite")?.innerText || "";
+                            const rawHref = a?.href || "";
+
+                            let realUrl = "";
+                            if (rawHref && !rawHref.includes("google.com/goto") && !rawHref.includes("google.com/url") && !rawHref.includes("google.com/search")) {
+                                realUrl = rawHref;
+                            } else if (rawHref.includes("/url?q=")) {
+                                try {
+                                    const u = new URL(rawHref);
+                                    realUrl = u.searchParams.get("q") || "";
+                                } catch {}
+                            }
+
+                            if (!realUrl && cite) {
+                                let cleanCite = cite.split(/[\s›>·]/)[0].trim();
+                                if (cleanCite && !cleanCite.startsWith("http")) {
+                                    cleanCite = "https://" + cleanCite;
                                 }
-                                if (!a || !a.href.startsWith("http") || a.href.includes("google.")) return null;
-                                let s = "",
-                                    c = a.parentElement;
-                                for (let j = 0; j < 6 && j++; c = c.parentElement) {
-                                    const txt = c.innerText || "";
-                                    if (txt.length > h3.innerText.length + 50) {
-                                        s = (txt.split("\n").find((l) => l.length > 30 && !l.includes(h3.innerText.substring(0, 20))) || "").trim().substring(0, 300);
-                                        if (s) break;
-                                    }
-                                }
-                                return { url: a.href, domain: new URL(a.href).hostname.replace("www.", ""), title: h3.innerText.trim(), snippet: s };
-                            })
-                            .filter(Boolean)
-                    );
+                                realUrl = cleanCite;
+                            }
+
+                            if (!realUrl) return;
+
+                            let domain = "";
+                            try {
+                                domain = new URL(realUrl.startsWith("http") ? realUrl : "https://" + realUrl).hostname.replace("www.", "");
+                            } catch {
+                                domain = realUrl.replace(/^https?:\/\//, "").split("/")[0].replace("www.", "");
+                            }
+
+                            // Filter out internal google services / empty / noise
+                            if (!domain || domain.includes("google.") || domain.length < 3 || !domain.includes(".")) return;
+
+                            if (!items.some((i) => i.domain === domain.toLowerCase())) {
+                                const snippetEl = c.querySelector("div.VwiC3b") || c.querySelector('div[style*="-webkit-line-clamp"]');
+                                let snippet = snippetEl ? snippetEl.innerText.trim() : "";
+
+                                items.push({
+                                    title: h3.innerText.trim(),
+                                    url: realUrl,
+                                    domain: domain.toLowerCase(),
+                                    snippet: snippet.substring(0, 300),
+                                });
+                            }
+                        });
+                        return items;
+                    });
+
                     if (pageResults.length > 0) break;
-                    await page.reload({ waitUntil: "networkidle" });
+                    await page.reload({ waitUntil: "domcontentloaded" });
                 } catch (err) {
                     if (retry === 2) break;
-                    await page.reload({ waitUntil: "networkidle" });
+                    await page.reload({ waitUntil: "domcontentloaded" });
                 }
             }
+
             if (!pageResults.length) break;
 
-            // 5. Result Synthesis: Update global results and check for target match
+            // 4. Result Synthesis: Update global results and check for target match
             for (const r of pageResults) {
                 r.position = allResults.length + 1;
                 allResults.push(r);
@@ -89,13 +121,16 @@ export async function rankTracker(keyword, targetDomain) {
                     found = { ...r, page: gPage + 1 };
                 }
             }
+
             if (found) break;
-            await page.waitForTimeout(2000 + Math.random() * 2000);
+            await page.waitForTimeout(1000 + Math.random() * 1000);
         }
 
-        // 6. Finalization: Close browser and extract competitors
+        // 5. Finalization: Close browser and extract competitors
         await browser.close();
-        const competitors = allResults.filter((r) => !r.domain.toLowerCase().includes(cleanTarget) && !cleanTarget.includes(r.domain.toLowerCase())).slice(0, 10);
+        const competitors = allResults
+            .filter((r) => !r.domain.toLowerCase().includes(cleanTarget) && !cleanTarget.includes(r.domain.toLowerCase()))
+            .slice(0, 10);
 
         return {
             success: true,

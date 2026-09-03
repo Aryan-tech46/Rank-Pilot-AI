@@ -63,8 +63,9 @@ export const analyzeUrl = async (req, res) => {
             try {
                 analysis.status = "failed";
                 await analysis.save();
-            } catch (saveError) {}
-            console.error("Failed to save failed status:", saveError.message);
+            } catch (saveError) {
+                console.error("Failed to save failed status:", saveError.message);
+            }
         }
     } catch (error) {
         console.error("Analyze URL error:", error.message);
